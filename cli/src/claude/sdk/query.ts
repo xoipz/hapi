@@ -27,6 +27,8 @@ import { withBunRuntimeEnv } from '@/utils/bunRuntime'
 import type { Writable } from 'node:stream'
 import { logger } from '@/ui/logger'
 
+let queryCounter = 0
+
 /**
  * Query class manages Claude Code process interaction
  */
@@ -36,6 +38,9 @@ export class Query implements AsyncIterableIterator<SDKMessage> {
     private sdkMessages: AsyncIterableIterator<SDKMessage>
     private inputStream = new Stream<SDKMessage>()
     private canCallTool?: CanCallToolCallback
+    private queryId: number
+    private exitPromise: Promise<void>
+    private exitResolve?: () => void
 
     constructor(
         private childStdin: Writable | null,
@@ -43,9 +48,24 @@ export class Query implements AsyncIterableIterator<SDKMessage> {
         private processExitPromise: Promise<void>,
         canCallTool?: CanCallToolCallback
     ) {
+        this.queryId = ++queryCounter
+        logger.debug(`[Query#${this.queryId}] Created with Stream#${this.inputStream.instanceId}`)
         this.canCallTool = canCallTool
+
+        // Create a promise that resolves when the process fully exits
+        this.exitPromise = new Promise<void>((resolve) => {
+            this.exitResolve = resolve
+        })
+
         this.readMessages()
         this.sdkMessages = this.readSdkMessages()
+    }
+
+    /**
+     * Wait for the process to fully exit
+     */
+    waitForExit(): Promise<void> {
+        return this.exitPromise
     }
 
     /**
@@ -85,12 +105,16 @@ export class Query implements AsyncIterableIterator<SDKMessage> {
      */
     private async readMessages(): Promise<void> {
         const rl = createInterface({ input: this.childStdout })
+        logger.debug(`[Query#${this.queryId}] Starting to read messages from stdout`)
+        let lineCount = 0
 
         try {
             for await (const line of rl) {
+                lineCount++
                 if (line.trim()) {
                     try {
                         const message = JSON.parse(line) as SDKMessage | SDKControlResponse
+                        logger.debug(`[Query#${this.queryId}] Received message ${lineCount}, type: ${message.type}`)
 
                         if (message.type === 'control_response') {
                             const controlResponse = message as SDKControlResponse
@@ -100,6 +124,7 @@ export class Query implements AsyncIterableIterator<SDKMessage> {
                             }
                             continue
                         } else if (message.type === 'control_request') {
+                            logger.debug(`[Query#${this.queryId}] Handling control request`)
                             await this.handleControlRequest(message as unknown as CanUseToolControlRequest)
                             continue
                         } else if (message.type === 'control_cancel_request') {
@@ -109,17 +134,25 @@ export class Query implements AsyncIterableIterator<SDKMessage> {
 
                         this.inputStream.enqueue(message)
                     } catch (e) {
-                        logger.debug(line)
+                        logger.debug(`[Query#${this.queryId}] Failed to parse line ${lineCount}: ${line.substring(0, 200)}`)
+                        logger.debug(`[Query#${this.queryId}] Parse error: ${e}`)
                     }
                 }
             }
+            logger.debug(`[Query#${this.queryId}] Stdout stream ended, read ${lineCount} lines, waiting for process exit`)
             await this.processExitPromise
         } catch (error) {
+            logger.debug(`[Query#${this.queryId}] Error reading messages: ${error}`)
             this.inputStream.error(error as Error)
         } finally {
+            logger.debug(`[Query#${this.queryId}] Cleanup, total lines read: ${lineCount}`)
             this.inputStream.done()
             this.cleanupControllers()
             rl.close()
+            // Signal that the process has fully exited
+            if (this.exitResolve) {
+                this.exitResolve()
+            }
         }
     }
 
@@ -339,13 +372,20 @@ export function query(config: {
     const spawnEnv = withBunRuntimeEnv(baseEnv, { allowBunBeBun: false })
     logDebug(`Spawning Claude Code process: ${spawnCommand} ${spawnArgs.join(' ')} (using ${isCommandOnly ? 'clean' : 'normal'} env)`)
 
+    // Log proxy environment variables for debugging
+    logger.debug(`[Claude Code] Spawn env - HTTP_PROXY: ${spawnEnv.HTTP_PROXY || 'not set'}`)
+    logger.debug(`[Claude Code] Spawn env - HTTPS_PROXY: ${spawnEnv.HTTPS_PROXY || 'not set'}`)
+    logger.debug(`[Claude Code] Spawn env - cwd: ${cwd || 'not set'}`)
+
     const child = spawn(spawnCommand, spawnArgs, {
         cwd,
         stdio: ['pipe', 'pipe', 'pipe'],
         signal: config.options?.abort,
         env: spawnEnv,
         // Use shell on Windows for command resolution
-        shell: process.platform === 'win32'
+        shell: process.platform === 'win32',
+        // Hide console window on Windows to prevent black windows appearing
+        windowsHide: true
     }) as ChildProcessWithoutNullStreams
 
     // Handle stdin
@@ -357,12 +397,13 @@ export function query(config: {
         childStdin = child.stdin
     }
 
-    // Handle stderr in debug mode
-    if (process.env.DEBUG) {
-        child.stderr.on('data', (data) => {
-            console.error('Claude Code stderr:', data.toString())
-        })
-    }
+    // Always capture stderr for debugging
+    let stderrBuffer = ''
+    child.stderr.on('data', (data) => {
+        const text = data.toString()
+        stderrBuffer += text
+        logger.debug('[Claude Code stderr]', text)
+    })
 
     // Setup cleanup
     const cleanup = () => {
@@ -380,11 +421,20 @@ export function query(config: {
             if (config.options?.abort?.aborted) {
                 query.setError(new AbortError('Claude Code process aborted by user'))
             }
-            if (code !== 0) {
-                query.setError(new Error(`Claude Code process exited with code ${code}`))
-            } else {
-                resolve()
+            if (code !== 0 && code !== null) {
+                // Provide more context for common exit codes
+                let errorMessage = `Claude Code process exited with code ${code}`
+                if (code === 58) {
+                    errorMessage += ' (possible API timeout or connection error)'
+                }
+                if (stderrBuffer.trim()) {
+                    errorMessage += `\nstderr: ${stderrBuffer.trim()}`
+                }
+                logger.debug(`[Claude Code] Exit code ${code}, stderr buffer: ${stderrBuffer || '(empty)'}`)
+                query.setError(new Error(errorMessage))
             }
+            // Always resolve so waitForExit() doesn't hang
+            resolve()
         })
     })
 

@@ -115,16 +115,40 @@ export function logDebug(message: string): void {
 }
 
 /**
- * Stream async messages to stdin
+ * Stream async messages to stdin with proper backpressure handling
  */
 export async function streamToStdin(
     stream: AsyncIterable<unknown>,
     stdin: NodeJS.WritableStream,
     abort?: AbortSignal
 ): Promise<void> {
-    for await (const message of stream) {
-        if (abort?.aborted) break
-        stdin.write(JSON.stringify(message) + '\n')
+    logger.debug('[streamToStdin] Starting to stream messages to stdin')
+    let messageCount = 0
+
+    // Helper to wait for drain event
+    const waitForDrain = (): Promise<void> => {
+        return new Promise((resolve) => {
+            stdin.once('drain', () => {
+                logger.debug('[streamToStdin] Drain event received')
+                resolve()
+            })
+        })
     }
+
+    for await (const message of stream) {
+        if (abort?.aborted) {
+            logger.debug('[streamToStdin] Aborted')
+            break
+        }
+        const jsonStr = JSON.stringify(message)
+        logger.debug(`[streamToStdin] Writing message ${++messageCount}: ${jsonStr.substring(0, 200)}...`)
+        const writeResult = stdin.write(jsonStr + '\n')
+        if (!writeResult) {
+            logger.debug('[streamToStdin] Write returned false, waiting for drain...')
+            await waitForDrain()
+        }
+        logger.debug(`[streamToStdin] Message ${messageCount} written successfully`)
+    }
+    logger.debug(`[streamToStdin] Done, wrote ${messageCount} messages, ending stdin`)
     stdin.end()
 }

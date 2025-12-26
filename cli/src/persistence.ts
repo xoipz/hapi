@@ -84,10 +84,20 @@ export async function updateSettings(
   let attempts = 0;
 
   // Acquire exclusive lock with retries
+  // Note: Use existsSync + writeFileSync for Windows compatibility
+  // (Bun has issues with O_EXCL flag on Windows for both sync and async APIs)
   while (attempts < MAX_LOCK_ATTEMPTS) {
     try {
-      // O_CREAT | O_EXCL | O_WRONLY = create exclusively, fail if exists
-      fileHandle = await open(lockFile, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY);
+      if (existsSync(lockFile)) {
+        throw Object.assign(new Error('Lock file exists'), { code: 'EEXIST' });
+      }
+      // Create lock file - not truly atomic but good enough for single-machine use
+      writeFileSync(lockFile, String(process.pid));
+      // Double-check we own the lock
+      if (readFileSync(lockFile, 'utf-8').trim() !== String(process.pid)) {
+        throw Object.assign(new Error('Lock file exists'), { code: 'EEXIST' });
+      }
+      fileHandle = { close: async () => { } }; // Dummy handle for consistency
       break;
     } catch (err: any) {
       if (err.code === 'EEXIST') {
@@ -269,38 +279,55 @@ export async function acquireDaemonLock(
 ): Promise<FileHandle | null> {
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
-      // O_EXCL ensures we only create if it doesn't exist (atomic lock acquisition)
-      const fileHandle = await open(
-        configuration.daemonLockFile,
-        constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY
-      );
-      // Write PID to lock file for debugging
-      await fileHandle.writeFile(String(process.pid));
-      return fileHandle;
-    } catch (error: any) {
-      if (error.code === 'EEXIST') {
+      // Check if lock file exists
+      if (existsSync(configuration.daemonLockFile)) {
         // Lock file exists, check if process is still running
         try {
           const lockPid = readFileSync(configuration.daemonLockFile, 'utf-8').trim();
           if (lockPid && !isNaN(Number(lockPid))) {
             try {
               process.kill(Number(lockPid), 0); // Check if process exists
-            } catch {
+              // Process is running, lock is held
+              throw Object.assign(new Error('Lock held'), { code: 'EEXIST' });
+            } catch (killError: any) {
+              if (killError.code === 'EEXIST') throw killError;
               // Process doesn't exist, remove stale lock
               unlinkSync(configuration.daemonLockFile);
-              continue; // Retry acquisition
             }
+          } else {
+            // Invalid PID, remove corrupted lock
+            unlinkSync(configuration.daemonLockFile);
           }
-        } catch {
-          // Can't read lock file, might be corrupted
+        } catch (readError: any) {
+          if (readError.code === 'EEXIST') throw readError;
+          // Can't read lock file, might be corrupted, try to remove
+          try { unlinkSync(configuration.daemonLockFile); } catch { }
         }
       }
 
-      if (attempt === maxAttempts) {
-        return null;
+      // Create lock file with PID
+      // Note: Using writeFileSync instead of O_EXCL for Windows/Bun compatibility
+      writeFileSync(configuration.daemonLockFile, String(process.pid));
+
+      // Verify we wrote our PID (race condition check)
+      const writtenPid = readFileSync(configuration.daemonLockFile, 'utf-8').trim();
+      if (writtenPid !== String(process.pid)) {
+        throw Object.assign(new Error('Lock acquired by another process'), { code: 'EEXIST' });
       }
-      const delayMs = attempt * delayIncrementMs;
-      await new Promise(resolve => setTimeout(resolve, delayMs));
+
+      // Open the file to keep a handle (prevents deletion while daemon runs)
+      const fileHandle = await open(configuration.daemonLockFile, 'r');
+      return fileHandle;
+    } catch (error: any) {
+      if (error.code === 'EEXIST') {
+        if (attempt === maxAttempts) {
+          return null;
+        }
+        const delayMs = attempt * delayIncrementMs;
+        await new Promise(resolve => setTimeout(resolve, delayMs));
+        continue;
+      }
+      throw error;
     }
   }
   return null;

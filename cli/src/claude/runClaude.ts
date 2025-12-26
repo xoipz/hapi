@@ -10,7 +10,7 @@ import { readSettings } from '@/persistence';
 import { EnhancedMode, PermissionMode } from './loop';
 import { MessageQueue2 } from '@/utils/MessageQueue2';
 import { hashObject } from '@/utils/deterministicJson';
-import { extractSDKMetadataAsync } from '@/claude/sdk/metadataExtractor';
+import { extractSDKMetadata } from '@/claude/sdk/metadataExtractor';
 import { parseSpecialCommand } from '@/parsers/specialCommands';
 import { getEnvironmentInfo } from '@/ui/doctor';
 import { configuration } from '@/configuration';
@@ -35,7 +35,9 @@ export interface StartOptions {
 }
 
 export async function runClaude(options: StartOptions = {}): Promise<void> {
-    const workingDirectory = process.cwd();
+    // HAPI_CWD allows daemon to specify working directory while spawning from cli project dir
+    // This is needed in dev mode because Bun requires cli project dir to resolve @/ aliases
+    const workingDirectory = process.env.HAPI_CWD || process.cwd();
     const sessionTag = randomUUID();
 
     // Log environment info at startup
@@ -105,8 +107,11 @@ export async function runClaude(options: StartOptions = {}): Promise<void> {
         logger.debug('[START] Failed to report to daemon (may not be running):', error);
     }
 
-    // Extract SDK metadata in background and update session when ready
-    extractSDKMetadataAsync(async (sdkMetadata) => {
+    // Extract SDK metadata synchronously to ensure process fully exits before starting actual session
+    // This prevents the metadata extraction process from interfering with the actual session
+    logger.debug('[metadataExtractor] Starting SDK metadata extraction');
+    const sdkMetadata = await extractSDKMetadata();
+    if (sdkMetadata.tools || sdkMetadata.slashCommands) {
         logger.debug('[start] SDK metadata extracted, updating session:', sdkMetadata);
         try {
             // Update session metadata with tools and slash commands
@@ -119,7 +124,7 @@ export async function runClaude(options: StartOptions = {}): Promise<void> {
         } catch (error) {
             logger.debug('[start] Failed to update session metadata:', error);
         }
-    });
+    }
 
     // Create realtime session
     const session = api.sessionSyncClient(response);

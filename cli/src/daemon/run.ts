@@ -16,7 +16,7 @@ import { writeDaemonState, DaemonLocallyPersistedState, readDaemonState, acquire
 import { cleanupDaemonState, getInstalledCliMtimeMs, isDaemonRunningCurrentlyInstalledHappyVersion, stopDaemon } from './controlClient';
 import { startDaemonControlServer } from './controlServer';
 import { join } from 'path';
-import { runtimePath } from '@/projectPath';
+import { runtimePath, isBunCompiled, projectPath } from '@/projectPath';
 
 // Prepare initial metadata
 export const initialMachineMetadata: MachineMetadata = {
@@ -261,23 +261,28 @@ export async function startDaemon(): Promise<void> {
 
         // TODO: In future, sessionId could be used with --resume to continue existing sessions
         // For now, we ignore it - each spawn creates a new session
+        // In dev mode, spawn from cli project dir (for @/ alias resolution) and pass HAPI_CWD
+        const spawnCwd = isBunCompiled() ? directory : projectPath();
         const happyProcess = spawnHappyCLI(args, {
-          cwd: directory,
+          cwd: spawnCwd,
           detached: true,  // Sessions stay alive when daemon stops
           stdio: ['ignore', 'pipe', 'pipe'],  // Capture stdout/stderr for debugging
           env: {
             ...process.env,
-            ...extraEnv
+            ...extraEnv,
+            // Pass user's working directory via env var (used by runClaude)
+            HAPI_CWD: directory
           }
         });
 
         // Log output for debugging
+        // Always log stderr to catch child process errors
+        happyProcess.stderr?.on('data', (data) => {
+          logger.debug(`[DAEMON RUN] Child stderr: ${data.toString()}`);
+        });
         if (process.env.DEBUG) {
           happyProcess.stdout?.on('data', (data) => {
             logger.debug(`[DAEMON RUN] Child stdout: ${data.toString()}`);
-          });
-          happyProcess.stderr?.on('data', (data) => {
-            logger.debug(`[DAEMON RUN] Child stderr: ${data.toString()}`);
           });
         }
 

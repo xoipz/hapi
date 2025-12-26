@@ -1,11 +1,12 @@
 /**
  * Outgoing Message Queue with strict ordering using incremental IDs
- * 
+ *
  * Ensures messages are always sent in the order they were received,
  * while allowing delayed messages to be released early when needed.
  */
 
 import { AsyncLock } from '@/utils/lock';
+import { logger } from '@/ui/logger';
 
 interface QueueItem {
     id: number;                    // Incremental ID for ordering
@@ -109,24 +110,30 @@ export class OutgoingMessageQueue {
     private processQueueInternal(): void {
         // Sort by ID to ensure order
         this.queue.sort((a, b) => a.id - b.id);
-        
+
+        logger.debug(`[OutgoingMessageQueue] Processing queue, ${this.queue.length} items`);
+
         // Process from front of queue
         while (this.queue.length > 0) {
             const item = this.queue[0];
-            
+
             // If not released yet, stop processing (maintain order)
             if (!item.released) {
+                logger.debug(`[OutgoingMessageQueue] Item ${item.id} not released, stopping`);
                 break;
             }
-            
+
             // Send if not already sent
             if (!item.sent) {
                 if (item.logMessage.type !== 'system') {
+                    logger.debug(`[OutgoingMessageQueue] Sending message ${item.id}, type: ${item.logMessage.type}`);
                     this.sendFunction(item.logMessage);
+                } else {
+                    logger.debug(`[OutgoingMessageQueue] Skipping system message ${item.id}`);
                 }
                 item.sent = true;
             }
-            
+
             // Remove from queue
             this.queue.shift();
         }

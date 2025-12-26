@@ -127,6 +127,7 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
     let ongoingToolCalls = new Map<string, { parentToolCallId: string | null }>();
 
     function onMessage(message: SDKMessage) {
+        logger.debug(`[onMessage] Received message type: ${message.type}`);
 
         // Write to message log
         formatClaudeMessageForInk(message, messageBuffer);
@@ -207,6 +208,7 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
         }
 
         const logMessage = sdkToLogConverter.convert(msg);
+        logger.debug(`[onMessage] Converted message: ${logMessage ? logMessage.type : 'null'}`);
         if (logMessage) {
             // Add permissions field to tool result content
             if (logMessage.type === 'user' && logMessage.message?.content) {
@@ -276,6 +278,7 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
 
             // Queue all other messages immediately (no delay)
             messageQueue.enqueue(logMessage);
+            logger.debug(`[onMessage] Message queued, type: ${logMessage.type}`);
         }
 
         // Insert a fake message to start the sidechain
@@ -398,7 +401,10 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                     session.client.sendSessionEvent({ type: 'message', message: 'Aborted by user' });
                 }
             } catch (e) {
-                logger.debug('[remote]: launch error', e);
+                const errorDetails = e instanceof Error
+                    ? { message: e.message, stack: e.stack, name: e.name }
+                    : { value: String(e), type: typeof e };
+                logger.debug('[remote]: launch error', errorDetails);
                 if (!exitReason) {
                     session.client.sendSessionEvent({ type: 'message', message: 'Process exited unexpectedly' });
                     continue;

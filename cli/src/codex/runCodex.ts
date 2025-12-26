@@ -25,7 +25,8 @@ export async function runCodex(opts: {
     startedBy?: 'daemon' | 'terminal';
     codexArgs?: string[];
 }): Promise<void> {
-    const workingDirectory = process.cwd();
+    // HAPI_CWD allows daemon to specify working directory while spawning from cli project dir
+    const workingDirectory = process.env.HAPI_CWD || process.cwd();
     const sessionTag = randomUUID();
 
     logger.debug(`[codex] Starting with options: startedBy=${opts.startedBy || 'terminal'}`);

@@ -38,6 +38,8 @@ export async function runAgentSession(opts: {
     startedBy?: 'daemon' | 'terminal';
 }): Promise<void> {
     const sessionTag = randomUUID();
+    // HAPI_CWD allows daemon to specify working directory while spawning from cli project dir
+    const workingDirectory = process.env.HAPI_CWD || process.cwd();
     const api = await ApiClient.create();
 
     const settings = await readSettings();
@@ -57,7 +59,7 @@ export async function runAgentSession(opts: {
     };
 
     const metadata: Metadata = {
-        path: process.cwd(),
+        path: workingDirectory,
         host: os.hostname(),
         version: packageJson.version,
         os: os.platform(),

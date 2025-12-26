@@ -18,12 +18,14 @@ export interface SDKMetadata {
  */
 export async function extractSDKMetadata(): Promise<SDKMetadata> {
     const abortController = new AbortController()
-    
+    let sdkQuery: Awaited<ReturnType<typeof query>> | null = null
+    let metadata: SDKMetadata = {}
+
     try {
         logger.debug('[metadataExtractor] Starting SDK metadata extraction')
-        
+
         // Run SDK with minimal tools allowed
-        const sdkQuery = query({
+        sdkQuery = query({
             prompt: 'hello',
             options: {
                 allowedTools: ['Bash(echo)'],
@@ -36,33 +38,42 @@ export async function extractSDKMetadata(): Promise<SDKMetadata> {
         for await (const message of sdkQuery) {
             if (message.type === 'system' && message.subtype === 'init') {
                 const systemMessage = message as SDKSystemMessage
-                
-                const metadata: SDKMetadata = {
+
+                metadata = {
                     tools: systemMessage.tools,
                     slashCommands: systemMessage.slash_commands
                 }
-                
+
                 logger.debug('[metadataExtractor] Captured SDK metadata:', metadata)
-                
+
                 // Abort the query since we got what we need
                 abortController.abort()
-                
-                return metadata
+                break
             }
         }
-        
-        logger.debug('[metadataExtractor] No init message received from SDK')
-        return {}
-        
+
+        if (!metadata.tools) {
+            logger.debug('[metadataExtractor] No init message received from SDK')
+        }
+
     } catch (error) {
         // Check if it's an abort error (expected)
         if (error instanceof Error && error.name === 'AbortError') {
             logger.debug('[metadataExtractor] SDK query aborted after capturing metadata')
-            return {}
+        } else {
+            logger.debug('[metadataExtractor] Error extracting SDK metadata:', error)
         }
-        logger.debug('[metadataExtractor] Error extracting SDK metadata:', error)
-        return {}
     }
+
+    // CRITICAL: Wait for the process to fully exit before returning
+    // This prevents the metadata extraction process from interfering with the actual session
+    if (sdkQuery) {
+        logger.debug('[metadataExtractor] Waiting for process to fully exit...')
+        await sdkQuery.waitForExit()
+        logger.debug('[metadataExtractor] Process fully exited')
+    }
+
+    return metadata
 }
 
 /**

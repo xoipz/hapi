@@ -146,6 +146,8 @@ export async function claudeRemote(opts: {
             content: initial.message,
         },
     });
+    // End the message stream so stdin closes and Claude starts processing
+    messages.end();
 
     // Start the loop
     const response = query({
@@ -158,6 +160,7 @@ export async function claudeRemote(opts: {
         logger.debug(`[claudeRemote] Starting to iterate over response`);
 
         for await (const message of response) {
+            logger.debug(`[claudeRemote] FOR LOOP: Received message type: ${message.type}`);
             logger.debugLargeJson(`[claudeRemote] Message ${message.type}`, message);
 
             // Handle messages
@@ -195,17 +198,9 @@ export async function claudeRemote(opts: {
                     isCompactCommand = false;
                 }
 
-                // Send ready event
+                // Send ready event and return - let caller handle next message
                 opts.onReady();
-
-                // Push next message
-                const next = await opts.nextMessage();
-                if (!next) {
-                    messages.end();
-                    return;
-                }
-                mode = next.mode;
-                messages.push({ type: 'user', message: { role: 'user', content: next.message } });
+                return;
             }
 
             // Handle tool result
